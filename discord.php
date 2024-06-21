@@ -1,20 +1,19 @@
 <?php
 
-$client_id = "";
-$secret_id = "";
-$scopes = "identify email";
-$domainurl = "https://billing.example.com";
-$guild_id = 000000000000000000;
-$role_id = 000000000000000000;
-$bot_token = "";
-
-
 use WHMCS\Authentication\CurrentUser;
 use WHMCS\ClientArea;
 
 define('CLIENTAREA', true);
 
 require __DIR__ . '/init.php';
+
+// Load sensitive information from config file
+$config = require __DIR__ . '/config.php';
+
+$client_id = $config['client_id'];
+$secret_id = $config['secret_id'];
+$scopes = $config['scopes'];
+$redirect_uri = $config['redirect_uri'];
 
 $ca = new ClientArea();
 $ca->setPageTitle('Discord Connection');
@@ -23,89 +22,106 @@ $ca->initPage();
 $currentUser = new CurrentUser();
 $client = $currentUser->client();
 
-if ($client) {    
-    if(isset($_GET['code'])) {  
+if ($client) {
+    if (isset($_GET['code'])) {
+        try {
+            $tokenData = exchangeAuthorizationCodeForAccessToken($_GET['code'], $client_id, $secret_id, $redirect_uri);
+            $userInfo = getUserInfo($tokenData->access_token);
 
-        /* Get user access token */
-        $ch = curl_init('https://discord.com/api/oauth2/token');
-        curl_setopt_array($ch, array(
-            CURLOPT_HTTPHEADER     => array('Authorization: Bearer '.$_GET['code']),
-            CURLOPT_VERBOSE        => 1,
-            CURLOPT_CONTENT_LENGTH => 0,
-            CURLOPT_POST           => 1,    
-            CURLOPT_SSL_VERIFYPEER => 0
-        ));
-        curl_setopt($ch, CURLOPT_POSTFIELDS, "grant_type=authorization_code&code=".$_GET['code']."&redirect_uri={$domainurl}/discord.php&client_id={$client_id}&client_secret={$secret_id}");
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        $data = curl_exec($ch);
-        $error = curl_error($ch);
-        curl_close($ch); 
-        $kaas = json_decode($data);
-
-        if ($kaas->access_token) {
-            /* Get user ids */
-            $ch = curl_init('https://discord.com/api/users/@me');
-            curl_setopt_array($ch, array(
-                CURLOPT_HTTPHEADER     => array('Authorization: Bearer '.$kaas->access_token),
-                CURLOPT_VERBOSE        => 1,
-                CURLOPT_CONTENT_LENGTH => 0,   
-                CURLOPT_SSL_VERIFYPEER => 0
-            ));
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            $data = curl_exec($ch);
-            $error = curl_error($ch);
-            curl_close($ch);
-            $kaas = json_decode($data);
-
-            /* Add Discord ID to client profile */
-            $command = 'UpdateClient';
-            $customfields = array('discord' => $kaas->id);
-            $postData = array(
-                'clientid' => $client->id,
-                'customfields' => base64_encode(serialize($customfields))
-            );
-
-            $results = localAPI($command, $postData);
-
-            /* Add role to user */
-            $currentUser = new CurrentUser();
-            $authUser = $currentUser->user();
-
-            $command = 'GetClientsDetails';
-            $postData = array(
-                'clientid' => $authUser->id,
-                'stats' => true,
-            );
-            $results = localAPI($command, $postData);
-
-            if ($results['stats']['productsnumactive'] > 0) {
-                $url = "https://discord.com/api/v9/guilds/{$guild_id}/members/{$kaas->id}/roles/{$role_id}"; 
-                $curl = curl_init();
-
-                $headers = [
-                    'Accept: application/json',
-                    'Content-Type: application/json',
-                    'Authorization: Bot ' . $bot_token
-                ];
-
-                curl_setopt($curl, CURLOPT_URL, $url);
-                curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-                curl_setopt($curl, CURLOPT_CUSTOMREQUEST, 'PUT');
-                curl_setopt($curl, CURLOPT_POSTFIELDS, []);
-                curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-                $response = curl_exec($curl);
-                curl_close($curl);
-
+            if (isset($userInfo->id)) {
+                updateClientDiscordId($userInfo->id, $client->id);
+                // Assign Discord role if needed
                 $ca->assign('message', "Discord Linked Successfully");
+            } else {
+                $ca->assign('message', "Failed to retrieve user information from Discord.");
             }
-        } else {    
-            $ca->assign('message', "This Link has Expired");
+        } catch (Exception $e) {
+            $ca->assign('message', $e->getMessage());
         }
     } else {
-        header('Location: https://discordapp.com/oauth2/authorize?response_type=code&client_id=' . $client_id . '&redirect_uri=' . $domainurl . '/discord.php&scope=' . $scopes );
+        redirectToDiscordForAuthorization($client_id, $redirect_uri, $scopes);
     }
+} else {
+    $ca->assign('message', "You must be logged in to link your Discord account.");
 }
 
 $ca->setTemplate('discord');
-
 $ca->output();
+
+function exchangeAuthorizationCodeForAccessToken($code, $client_id, $secret_id, $redirect_uri)
+{
+    $ch = curl_init('https://discord.com/api/oauth2/token');
+    curl_setopt_array($ch, array(
+        CURLOPT_HTTPHEADER     => array('Authorization: Basic ' . base64_encode("$client_id:$secret_id")),
+        CURLOPT_POST           => 1,
+        CURLOPT_POSTFIELDS     => http_build_query(array(
+            'grant_type'    => 'authorization_code',
+            'code'          => $code,
+            'redirect_uri'  => $redirect_uri
+        )),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => false
+    ));
+
+    $tokenResponse = curl_exec($ch);
+
+    if ($tokenResponse === false) {
+        throw new Exception('Failed to retrieve access token: ' . curl_error($ch));
+    }
+
+    $tokenData = json_decode($tokenResponse);
+
+    if (!isset($tokenData->access_token)) {
+        throw new Exception('Failed to retrieve access token: ' . json_encode($tokenData));
+    }
+
+    return $tokenData;
+}
+
+function getUserInfo($accessToken)
+{
+    $ch = curl_init('https://discord.com/api/users/@me');
+    curl_setopt_array($ch, array(
+        CURLOPT_HTTPHEADER     => array('Authorization: Bearer ' . $accessToken),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_SSL_VERIFYPEER => false
+    ));
+
+    $userInfoResponse = curl_exec($ch);
+
+    if ($userInfoResponse === false) {
+        throw new Exception('Failed to retrieve user information: ' . curl_error($ch));
+    }
+
+    $userInfo = json_decode($userInfoResponse);
+
+    if (!isset($userInfo->id)) {
+        throw new Exception('Failed to retrieve user information: ' . json_encode($userInfo));
+    }
+
+    return $userInfo;
+}
+
+function updateClientDiscordId($discordId, $clientId)
+{
+    $command = 'UpdateClient';
+    $customFields = array('discord' => $discordId);
+    $postData = array(
+        'clientid'      => $clientId,
+        'customfields'  => base64_encode(serialize($customFields))
+    );
+
+    $results = localAPI($command, $postData);
+
+    if ($results['result'] !== 'success') {
+        throw new Exception('Failed to update client Discord ID: ' . $results['message']);
+    }
+}
+
+function redirectToDiscordForAuthorization($clientId, $redirectUri, $scopes)
+{
+    $authorizationUrl = 'https://discord.com/oauth2/authorize?response_type=code&client_id=' . $clientId . '&redirect_uri=' . urlencode($redirectUri) . '&scope=' . urlencode($scopes);
+    header('Location: ' . $authorizationUrl);
+    exit();
+}
+?>
