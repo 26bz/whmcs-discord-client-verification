@@ -23,10 +23,17 @@ This integration allows paying customers to obtain a Discord role by visiting `/
      ```
      Store `config.php` securely outside the web root or use environment variables to prevent unauthorized access.
 
-2. **Create Custom Field**:
+2. **Update Discord.php**:
+   - In `discord.php`, update the line to load sensitive information from `config.php`:
+     ```php
+     // Load sensitive information from config file
+     $config = require __DIR__ . '/config.php';
+     ```
+
+3. **Create Custom Field**:
    - [Create a custom client field named `discord` in WHMCS](https://docs.whmcs.com/Custom_Client_Fields) to store the customer's Discord ID.
 
-3. **Usage**:
+4. **Usage**:
    - Paying customers can visit `/discord.php` to link their Discord account.
    - Upon verification, they will receive a Discord role based on their active product status in WHMCS.
 
